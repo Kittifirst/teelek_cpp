@@ -1,115 +1,310 @@
-#include "motorDrive.h"
+#include <Arduino.h>
+#include <micro_ros_platformio.h>
+#include <stdio.h>
 
-// ===== Shared variables =====
-String rx_line;
-bool estop = false;
-uint32_t last_cmd_ms = 0;
+#include <vector>
+#include <cmath>
+#include <utility>
 
-float tgt_LF=0, tgt_LR=0, tgt_RF=0, tgt_RR=0;
-float out_LF=0, out_LR=0, out_RF=0, out_RR=0;
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
 
-static bool trackToggle = false;
+#include <rosidl_runtime_c/primitives_sequence_functions.h>
+#include <std_msgs/msg/bool.h>
+#include <std_msgs/msg/string.h>
+#include <geometry_msgs/msg/twist.h>
+#include <std_msgs/msg/float32_multi_array.h>
 
-// ===== PWM Utils =====
-static void writeMotorPWM(int ch_in1, int ch_in2, float val) {
-    int duty_fwd=0, duty_rev=0;
-    int duty = int(abs(val) * PWM_MAX_DUTY);
-    if (val > 0) duty_fwd = duty;
-    else if (val < 0) duty_rev = duty;
-    ledcWrite(ch_in1, duty_fwd);
-    ledcWrite(ch_in2, duty_rev);
+#include <config.h>
+#include <motor.h>
+#include <PIDF.h>
+#include <Utilize.h>
+
+#include <esp32_Encoder.h>    
+#include <ESP32Servo.h>
+
+#define RCCHECK(fn)                  \
+    {                                \
+        rcl_ret_t temp_rc = fn;      \
+        if ((temp_rc != RCL_RET_OK)) \
+        {                            \
+            rclErrorLoop();          \
+        }                            \
+    }
+    #define RCSOFTCHECK(fn)              \
+    {                                \
+        rcl_ret_t temp_rc = fn;      \
+        if ((temp_rc != RCL_RET_OK)) \
+        {                            \
+        }                            \
+    }
+    #define EXECUTE_EVERY_N_MS(MS, X)          \
+    do                                     \
+    {                                      \
+        static volatile int64_t init = -1; \
+        if (init == -1)                    \
+        {                                  \
+            init = uxr_millis();           \
+        }                                  \
+        if (uxr_millis() - init > MS)      \
+        {                                  \
+            X;                             \
+            init = uxr_millis();           \
+        }                                  \
+    } while (0)
+    
+    //------------------------------ < Define > -------------------------------------//
+
+rcl_publisher_t debug_cmd_vel_publisher;
+
+rcl_subscription_t cmd_vel_subscriber;
+
+geometry_msgs__msg__Twist debug_wheel_motor_msg;
+geometry_msgs__msg__Twist cmd_vel_msg;
+
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+rcl_timer_t control_timer;
+rcl_init_options_t init_options;
+
+long long ticks_L_front = 0;
+long long ticks_R_front = 0;
+
+enum states
+{
+    WAITING_AGENT,
+    AGENT_AVAILABLE,
+    AGENT_CONNECTED,
+    AGENT_DISCONNECTED
+} state;
+
+//------------------------------ < Fuction Prototype > ------------------------------//
+void rclErrorLoop();
+void syncTime();
+bool createEntities();
+bool destroyEntities();
+struct timespec getTime();
+
+void publishData();
+void getEncoderData();
+void MovePower(int, int);
+//------------------------------ < Main > -------------------------------------//
+
+void setup()
+{
+
+    Serial.begin(115200);
+    #ifdef MICROROS_WIFI
+        
+        IPAddress agent_ip(AGENT_IP);
+        uint16_t agent_port = AGENT_PORT;
+        set_microros_wifi_transports((char*)SSID, (char*)SSID_PW, agent_ip, agent_port);
+    #else
+        set_microros_serial_transports(Serial);
+    #endif
 }
 
-// ===== init =====
-void motorDrive_begin() {
-    ledcSetup(CH_LF_IN1, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcSetup(CH_LF_IN2, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcSetup(CH_LR_IN1, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcSetup(CH_LR_IN2, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcSetup(CH_RF_IN1, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcSetup(CH_RF_IN2, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcSetup(CH_RR_IN1, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcSetup(CH_RR_IN2, PWM_FREQ_HZ, PWM_RES_BITS);
-
-    ledcAttachPin(LF_IN1, CH_LF_IN1);
-    ledcAttachPin(LF_IN2, CH_LF_IN2);
-    ledcAttachPin(LR_IN1, CH_LR_IN1);
-    ledcAttachPin(LR_IN2, CH_LR_IN2);
-    ledcAttachPin(RF_IN1, CH_RF_IN1);
-    ledcAttachPin(RF_IN2, CH_RF_IN2);
-    ledcAttachPin(RR_IN1, CH_RR_IN1);
-    ledcAttachPin(RR_IN2, CH_RR_IN2);
-
-    last_cmd_ms = millis();
-}
-
-// ===== VW -> target wheels =====
-void cmdVW_to_targets(float V_mps, float W_radps) {
-    float vL = V_mps - (W_radps * WHEEL_SEP / 2.0f);
-    float vR = V_mps + (W_radps * WHEEL_SEP / 2.0f);
-
-    tgt_LF = constrain(vL / (WHEEL_RADIUS * MAX_OMEGA_FOR_FULL), -1,1);
-    tgt_LR = tgt_LF;
-    tgt_RF = constrain(vR / (WHEEL_RADIUS * MAX_OMEGA_FOR_FULL), -1,1);
-    tgt_RR = tgt_RF;
-
-    last_cmd_ms = millis();
-}
-
-// ===== handle serial =====
-void motorDrive_handleSerialOnce() {
-    while (Serial.available()) {
-        char c = Serial.read();
-        if (c=='\n' || c=='\r') {
-            if (rx_line.length()) {
-                if (rx_line.startsWith("VW")) {
-                    float v,w;
-                    sscanf(rx_line.c_str(),"VW %f %f",&v,&w);
-                    cmdVW_to_targets(v,w);
-                } else if (rx_line.startsWith("P")) {
-                    float lf,lr,rf,rr;
-                    sscanf(rx_line.c_str(),"P %f %f %f %f",&lf,&lr,&rf,&rr);
-                    tgt_LF=lf;tgt_LR=lr;tgt_RF=rf;tgt_RR=rr;
-                    last_cmd_ms = millis();
-                } else if (rx_line.startsWith("ESTOP")) {
-                    estop = true;
-                } else if (rx_line.startsWith("BTN TRACK")) {
-                    trackToggle = true;
-                }
-                rx_line="";
-            }
-        } else rx_line += c;
+void loop()
+{   
+    switch (state)
+    {
+    case WAITING_AGENT:
+        // EXECUTE_EVERY_N_MS(500, state = (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) ? AGENT_AVAILABLE : WAITING_AGENT;);
+        EXECUTE_EVERY_N_MS(1200, state = (RMW_RET_OK == rmw_uros_ping_agent(600, 5)) ? AGENT_AVAILABLE : WAITING_AGENT;);
+        break;
+    case AGENT_AVAILABLE:
+        state = (true == createEntities()) ? AGENT_CONNECTED : WAITING_AGENT;
+        if (state == WAITING_AGENT)
+        {
+            destroyEntities();
+        }
+        break;
+    case AGENT_CONNECTED:
+        EXECUTE_EVERY_N_MS(700, state = (RMW_RET_OK == rmw_uros_ping_agent(600, 5)) ? AGENT_CONNECTED : AGENT_DISCONNECTED;);
+        if (state == AGENT_CONNECTED)
+        {
+            rclc_executor_spin_some(&executor, RCL_MS_TO_NS(500));
+        }
+        break;
+    case AGENT_DISCONNECTED:
+        MovePower(0, 0);
+        destroyEntities();
+        disconnect_count = 0;
+        state = WAITING_AGENT;
+        break;
+    default:
+        break;
     }
 }
 
-// ===== update PWM =====
-void motorDrive_update() {
-    uint32_t now = millis();
-    if ((now-last_cmd_ms) > CMD_TIMEOUT_MS) {
-        tgt_LF *= IDLE_DECAY;
-        tgt_LR *= IDLE_DECAY;
-        tgt_RF *= IDLE_DECAY;
-        tgt_RR *= IDLE_DECAY;
-    }
+//------------------------------ < Fuction > -------------------------------------//
 
-    auto ramp = [](float &out, float tgt){
-        if (fabs(tgt-out) > RAMP_STEP) out += (tgt>out?RAMP_STEP:-RAMP_STEP);
-        else out = tgt;
-    };
-
-    ramp(out_LF, tgt_LF);
-    ramp(out_LR, tgt_LR);
-    ramp(out_RF, tgt_RF);
-    ramp(out_RR, tgt_RR);
-
-    // write PWM
-    writeMotorPWM(CH_LF_IN1, CH_LF_IN2, INVERT_LF?-out_LF:out_LF);
-    writeMotorPWM(CH_LR_IN1, CH_LR_IN2, INVERT_LR?-out_LR:out_LR);
-    writeMotorPWM(CH_RF_IN1, CH_RF_IN2, INVERT_RF?-out_RF:out_RF);
-    writeMotorPWM(CH_RR_IN1, CH_RR_IN2, INVERT_RR?-out_RR:out_RR);
+void MovePower(int Motor1Speed, int Motor2Speed)
+{
+    Motor1Speed = constrain(Motor1Speed, PWM_Min, PWM_Max);
+    Motor2Speed = constrain(Motor2Speed, PWM_Min, PWM_Max);
 }
 
-bool motorDrive_consumeTrackToggle() {
-    if (trackToggle) { trackToggle=false; return true; }
-    return false;
+
+void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
+{
+    RCLC_UNUSED(last_call_time);
+    if (timer != NULL)
+    {
+        getEncoderData();
+        publishData();
+    }
+}
+
+void cmd_vel_callback(const void * msgin) 
+{
+    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+    V_x = msg->linear.x;
+    V_y = msg->linear.y;
+    Omega_z = msg->angular.z;
+}
+
+bool createEntities()
+{
+    allocator = rcl_get_default_allocator();
+    
+    init_options = rcl_get_zero_initialized_init_options();
+    rcl_init_options_init(&init_options, allocator);
+    rcl_init_options_set_domain_id(&init_options, 10);
+    
+    rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator);
+    
+    // create node
+    #ifdef ESP32_HARDWARE1
+        RCCHECK(rclc_node_init_default(&node, "differential_swerve_esp_hardware1", "", &support));
+    #elif ESP32_HARDWARE2
+        RCCHECK(rclc_node_init_default(&node, "differential_swerve_esp_hardware2", "", &support));
+    #endif
+
+    // Publishers
+    #ifdef ESP32_HARDWARE1
+    #elif ESP32_HARDWARE2
+    #endif
+
+    RCCHECK(rclc_publisher_init_default(
+        &debug_cmd_vel_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "debug/wheel/cmd_vel"));
+
+    RCCHECK(rclc_subscription_init_default(
+        &cmd_vel_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/cmd_vel"));
+        
+    // create timer for control loop 1000/40 Hz
+    const unsigned int control_timeout = 40;
+    RCCHECK(rclc_timer_init_default(
+        &control_timer,
+        &support,
+        RCL_MS_TO_NS(control_timeout),
+        &controlCallback));
+        
+    executor = rclc_executor_get_zero_initialized_executor();
+    RCCHECK(rclc_executor_init(&executor, &support.context, 5, &allocator));
+    
+    RCCHECK(rclc_executor_add_timer(&executor, &control_timer));
+    
+    RCCHECK(rclc_executor_add_subscription(
+        &executor,
+        &cmd_vel_subscriber,
+        &cmd_vel_msg,
+        &cmd_vel_callback,
+        ON_NEW_DATA));
+
+    syncTime();
+
+    return true;
+}
+
+bool destroyEntities()
+{
+    rmw_context_t *rmw_context = rcl_context_get_rmw_context(&support.context);
+    (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
+    
+    rcl_subscription_fini(&cmd_vel_subscriber, &node);
+
+    rcl_publisher_fini(&debug_cmd_vel_publisher, &node);
+
+    rcl_node_fini(&node);
+    rcl_timer_fini(&control_timer);
+    rclc_executor_fini(&executor);
+    rclc_support_fini(&support);
+
+    return true;
+}
+
+void getEncoderData()
+{
+    #ifdef ESP32_HARDWARE1
+    // Get encoder data
+    rpm_front_L = Encoder1.getRPM();
+    rpm_front_R = Encoder2.getRPM();
+    rpm_rear_left_L = Encoder3.getRPM();
+    rpm_rear_left_R = Encoder4.getRPM();
+
+    // debug_wheel_motorRPM_msg.linear.x = rpm_front_L;
+    // debug_wheel_motorRPM_msg.linear.y = rpm_front_R;
+    // debug_wheel_motorRPM_msg.linear.z = rpm_rear_left_L;
+    // debug_wheel_motorRPM_msg.angular.x = rpm_rear_left_R;
+    #elif ESP32_HARDWARE2
+    rpm_rear_right_L = Encoder5.getRPM();
+    rpm_rear_right_R = Encoder6.getRPM();
+
+    // debug_wheel_motorRPM_msg.angular.y = rpm_rear_right_L;
+    // debug_wheel_motorRPM_msg.angular.z = rpm_rear_right_R;
+    #endif
+    debug_wheel_encoder_msg.linear.x = rpm_front_L;
+    debug_wheel_encoder_msg.linear.y = rpm_front_R;
+    debug_wheel_encoder_msg.linear.z = 0.0;
+    // debug_wheel_encoder_msg.linear.z = Encoder3.getRPM();
+
+}
+
+void publishData()
+{
+    debug_wheel_motor_msg.linear.x = cmd_vel_msg.linear.x;
+    debug_wheel_motor_msg.linear.y = cmd_vel_msg.linear.y;
+    debug_wheel_motor_msg.angular.z = cmd_vel_msg.angular.z;
+    struct timespec time_stamp = getTime();
+    rcl_publish(&debug_cmd_vel_publisher, &debug_wheel_motor_msg, NULL);
+}
+
+void syncTime()
+{
+    // get the current time from the agent
+        unsigned long now = millis();
+        RCCHECK(rmw_uros_sync_session(10));
+        unsigned long long ros_time_ms = rmw_uros_epoch_millis();
+    // now we can find the difference between ROS time and uC time
+    time_offset = ros_time_ms - now;
+}
+
+struct timespec getTime()
+{
+    struct timespec tp = {0};
+    // add time difference between uC time and ROS time to
+    // synchronize time with ROS
+    unsigned long long now = millis() + time_offset;
+        tp.tv_sec = now / 1000;
+        tp.tv_nsec = (now % 1000) * 1000000;
+    return tp;
+}
+
+void rclErrorLoop()
+{
+    while (true)
+    {
+        delay(1000);
+    }
 }
