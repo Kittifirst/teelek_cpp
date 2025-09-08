@@ -71,6 +71,9 @@ rcl_node_t node;
 rcl_timer_t control_timer;
 rcl_init_options_t init_options;
 
+unsigned long long time_offset = 0;
+unsigned long prev_cmd_time = 0;
+
 long long ticks_L_front = 0;
 long long ticks_R_front = 0;
 
@@ -82,6 +85,12 @@ enum states
     AGENT_DISCONNECTED
 } state;
 
+
+Controller motor1(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR1_INV, MOTOR1_BRAKE, MOTOR1_PWM, MOTOR1_IN_A, MOTOR1_IN_B);
+Controller motor2(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR2_INV, MOTOR2_BRAKE, MOTOR2_PWM, MOTOR2_IN_A, MOTOR2_IN_B);
+Controller motor3(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR3_INV, MOTOR3_BRAKE, MOTOR3_PWM, MOTOR3_IN_A, MOTOR3_IN_B);
+Controller motor4(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR4_INV, MOTOR4_BRAKE, MOTOR4_PWM, MOTOR4_IN_A, MOTOR4_IN_B);
+
 //------------------------------ < Fuction Prototype > ------------------------------//
 void rclErrorLoop();
 void syncTime();
@@ -91,7 +100,7 @@ struct timespec getTime();
 
 void publishData();
 void getEncoderData();
-void MovePower(int, int);
+void MovePower(int, int, int, int);
 //------------------------------ < Main > -------------------------------------//
 
 void setup()
@@ -114,7 +123,7 @@ void loop()
     {
     case WAITING_AGENT:
         // EXECUTE_EVERY_N_MS(500, state = (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) ? AGENT_AVAILABLE : WAITING_AGENT;);
-        EXECUTE_EVERY_N_MS(1200, state = (RMW_RET_OK == rmw_uros_ping_agent(600, 5)) ? AGENT_AVAILABLE : WAITING_AGENT;);
+        EXECUTE_EVERY_N_MS(1500, state = (RMW_RET_OK == rmw_uros_ping_agent(1000, 10)) ? AGENT_AVAILABLE : WAITING_AGENT;);
         break;
     case AGENT_AVAILABLE:
         state = (true == createEntities()) ? AGENT_CONNECTED : WAITING_AGENT;
@@ -131,9 +140,8 @@ void loop()
         }
         break;
     case AGENT_DISCONNECTED:
-        MovePower(0, 0);
+        MovePower(0, 0, 0, 0);
         destroyEntities();
-        disconnect_count = 0;
         state = WAITING_AGENT;
         break;
     default:
@@ -143,10 +151,17 @@ void loop()
 
 //------------------------------ < Fuction > -------------------------------------//
 
-void MovePower(int Motor1Speed, int Motor2Speed)
+void MovePower(int Motor1Speed, int Motor2Speed, int Motor3Speed, int Motor4Speed)
 {
     Motor1Speed = constrain(Motor1Speed, PWM_Min, PWM_Max);
     Motor2Speed = constrain(Motor2Speed, PWM_Min, PWM_Max);
+    Motor3Speed = constrain(Motor3Speed, PWM_Min, PWM_Max);
+    Motor4Speed = constrain(Motor4Speed, PWM_Min, PWM_Max);
+
+    motor1.spin(Motor1Speed);
+    motor2.spin(Motor2Speed);
+    motor3.spin(Motor3Speed);
+    motor4.spin(Motor4Speed);
 }
 
 
@@ -163,9 +178,16 @@ void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
 void cmd_vel_callback(const void * msgin) 
 {
     const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
-    V_x = msg->linear.x;
-    V_y = msg->linear.y;
-    Omega_z = msg->angular.z;
+    float V_x = msg->linear.x;
+    float V_y = 0.0;
+    float W_z = msg->angular.z;
+    float d = max(abs(V_x) + abs(V_y) + abs(W_z), (float) PWM_Max);
+    int fl = (V_x - W_z)/d * (float) PWM_Max;
+    int fr = (V_x + W_z)/d * (float) PWM_Max;
+    int bl = (V_x - W_z)/d * (float) PWM_Max;
+    int br = (V_x + W_z)/d * (float) PWM_Max;
+    MovePower(fl, fr,
+              bl, br);
 }
 
 bool createEntities()
@@ -179,15 +201,15 @@ bool createEntities()
     rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator);
     
     // create node
-    #ifdef ESP32_HARDWARE1
-        RCCHECK(rclc_node_init_default(&node, "differential_swerve_esp_hardware1", "", &support));
-    #elif ESP32_HARDWARE2
-        RCCHECK(rclc_node_init_default(&node, "differential_swerve_esp_hardware2", "", &support));
+    #ifdef teelek_karake
+        RCCHECK(rclc_node_init_default(&node, "teelek_karake", "", &support));
+    #elif teelek_katsu
+        RCCHECK(rclc_node_init_default(&node, "teelek_katsu", "", &support));
     #endif
 
     // Publishers
-    #ifdef ESP32_HARDWARE1
-    #elif ESP32_HARDWARE2
+    #ifdef teelek_karake
+    #elif teelek_katsu
     #endif
 
     RCCHECK(rclc_publisher_init_default(
@@ -200,7 +222,7 @@ bool createEntities()
         &cmd_vel_subscriber,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "/cmd_vel"));
+        "/teelek/cmd_move"));
         
     // create timer for control loop 1000/40 Hz
     const unsigned int control_timeout = 40;
@@ -246,28 +268,29 @@ bool destroyEntities()
 
 void getEncoderData()
 {
-    #ifdef ESP32_HARDWARE1
-    // Get encoder data
-    rpm_front_L = Encoder1.getRPM();
-    rpm_front_R = Encoder2.getRPM();
-    rpm_rear_left_L = Encoder3.getRPM();
-    rpm_rear_left_R = Encoder4.getRPM();
+    // #ifdef teelek_karake
+    // // Get encoder data
+    // rpm_front_L = Encoder1.getRPM();
+    // rpm_front_R = Encoder2.getRPM();
+    // rpm_rear_left_L = Encoder3.getRPM();
+    // rpm_rear_left_R = Encoder4.getRPM();
 
-    // debug_wheel_motorRPM_msg.linear.x = rpm_front_L;
-    // debug_wheel_motorRPM_msg.linear.y = rpm_front_R;
-    // debug_wheel_motorRPM_msg.linear.z = rpm_rear_left_L;
-    // debug_wheel_motorRPM_msg.angular.x = rpm_rear_left_R;
-    #elif ESP32_HARDWARE2
-    rpm_rear_right_L = Encoder5.getRPM();
-    rpm_rear_right_R = Encoder6.getRPM();
+    // // debug_wheel_motorRPM_msg.linear.x = rpm_front_L;
+    // // debug_wheel_motorRPM_msg.linear.y = rpm_front_R;
+    // // debug_wheel_motorRPM_msg.linear.z = rpm_rear_left_L;
+    // // debug_wheel_motorRPM_msg.angular.x = rpm_rear_left_R;
+    // #elif teelek_katsu
+    // rpm_rear_right_L = Encoder5.getRPM();
+    // rpm_rear_right_R = Encoder6.getRPM();
 
-    // debug_wheel_motorRPM_msg.angular.y = rpm_rear_right_L;
-    // debug_wheel_motorRPM_msg.angular.z = rpm_rear_right_R;
-    #endif
-    debug_wheel_encoder_msg.linear.x = rpm_front_L;
-    debug_wheel_encoder_msg.linear.y = rpm_front_R;
-    debug_wheel_encoder_msg.linear.z = 0.0;
-    // debug_wheel_encoder_msg.linear.z = Encoder3.getRPM();
+    // // debug_wheel_motorRPM_msg.angular.y = rpm_rear_right_L;
+    // // debug_wheel_motorRPM_msg.angular.z = rpm_rear_right_R;
+    // #endif
+
+    // // debug_wheel_encoder_msg.linear.x = 0.0;
+    // // debug_wheel_encoder_msg.linear.y = 0.0;
+    // // debug_wheel_encoder_msg.linear.z = 0.0;
+    // // debug_wheel_encoder_msg.linear.z = Encoder3.getRPM();
 
 }
 
@@ -303,8 +326,9 @@ struct timespec getTime()
 
 void rclErrorLoop()
 {
-    while (true)
-    {
-        delay(1000);
-    }
+    ESP.restart();
+    // while (true)
+    // {
+    //     delay(1000);
+    // }
 }
