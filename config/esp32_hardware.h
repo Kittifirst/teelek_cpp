@@ -51,13 +51,13 @@
 
         // Motor 2 Parameters
         #define MOTOR2_PWM  -1
-        #define MOTOR2_IN_A 15
-        #define MOTOR2_IN_B 16
+        #define MOTOR2_IN_A 1
+        #define MOTOR2_IN_B 2 
 
         // Motor 3 Parameters
         #define MOTOR3_PWM  -1
-        #define MOTOR3_IN_A 1
-        #define MOTOR3_IN_B 2
+        #define MOTOR3_IN_A 15
+        #define MOTOR3_IN_B 16
 
         // Motor 4 Parameters
         #define MOTOR4_PWM  -1
