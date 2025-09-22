@@ -58,11 +58,14 @@
     //------------------------------ < Define > -------------------------------------//
 
 rcl_publisher_t debug_cmd_vel_publisher;
-
 rcl_subscription_t cmd_vel_subscriber;
 
 geometry_msgs__msg__Twist debug_wheel_motor_msg;
 geometry_msgs__msg__Twist cmd_vel_msg;
+
+rcl_subscription_t cmd_load_subscriber;
+geometry_msgs__msg__Twist cmd_load_msg;
+
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -91,6 +94,8 @@ Controller motor2(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR2_INV, MO
 Controller motor3(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR3_INV, MOTOR3_BRAKE, MOTOR3_PWM, MOTOR3_IN_A, MOTOR3_IN_B);
 Controller motor4(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR4_INV, MOTOR4_BRAKE, MOTOR4_PWM, MOTOR4_IN_A, MOTOR4_IN_B);
 
+Controller motorload(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS,MOTORLOAD_INV, MOTORLOAD_BRAKE, MOTORLOAD_PWM,MOTORLOAD_IN_A, MOTORLOAD_IN_B);
+
 //------------------------------ < Fuction Prototype > ------------------------------//
 void rclErrorLoop();
 void syncTime();
@@ -101,6 +106,7 @@ struct timespec getTime();
 void publishData();
 void getEncoderData();
 void MovePower(int, int, int, int);
+void load(int);
 //------------------------------ < Main > -------------------------------------//
 
 void setup()
@@ -164,6 +170,11 @@ void MovePower(int Motor1Speed, int Motor2Speed, int Motor3Speed, int Motor4Spee
     motor4.spin(Motor4Speed);
 }
 
+void load(int MotorloadSpeed)
+{
+    MotorloadSpeed = constrain(MotorloadSpeed,  PWM_Min, PWM_Max);
+    motorload.spin(MotorloadSpeed);
+}
 
 void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
 {
@@ -189,6 +200,14 @@ void cmd_vel_callback(const void * msgin)
     MovePower(fl, fr,
               bl, br);
 }
+
+void cmd_load_callback(const void * msgin) 
+{
+    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+    int load_speed = (int) msg->linear.x;   // อ่านค่าจาก Python
+    load(load_speed);                       // เรียกฟังก์ชัน load ของคุณ
+}
+
 
 bool createEntities()
 {
@@ -223,6 +242,13 @@ bool createEntities()
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "/teelek/cmd_move"));
+
+    RCCHECK(rclc_subscription_init_default(
+        &cmd_load_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/teelek/cmd_load"));
+
         
     // create timer for control loop 1000/40 Hz
     const unsigned int control_timeout = 40;
@@ -257,6 +283,8 @@ bool destroyEntities()
     rcl_subscription_fini(&cmd_vel_subscriber, &node);
 
     rcl_publisher_fini(&debug_cmd_vel_publisher, &node);
+    
+    rcl_subscription_fini(&cmd_load_subscriber, &node);
 
     rcl_node_fini(&node);
     rcl_timer_fini(&control_timer);

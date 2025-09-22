@@ -24,7 +24,10 @@
     #define PWM_FREQUENCY 20000                                             // PWM Frequency
     #define PWM_Max 1023
     #define PWM_Min PWM_Max * -1
-    #define GEAR_Ratio 1.575                                                // Midpoint of the PWM signal
+    #define GEAR_Ratio 1.575                                               // Midpoint of the PWM signal
+    //define motorload
+    #define MOTORLOAD_PWM_MIN = 1023
+    #define MOTORLOAD_PWM_MAX = 1023
 
     // #define FIRST_TCA_CHANNEL 3 // TCA9548A channel for the first AS5600 sensor
     // #define AS5600_COUNT 3 // Number of AS5600 sensors
@@ -34,12 +37,14 @@
     #define MOTOR2_INV true
     #define MOTOR3_INV false
     #define MOTOR4_INV true
+    #define MOTORLOAD_INV false
 
     //  Motor Brake
     #define MOTOR1_BRAKE true
     #define MOTOR2_BRAKE true
     #define MOTOR3_BRAKE true
     #define MOTOR4_BRAKE true
+    #define MOTORLOAD_BRAKE true
 
 
     #ifdef teelek_karake
@@ -63,6 +68,12 @@
         #define MOTOR4_PWM  -1
         #define MOTOR4_IN_A 38
         #define MOTOR4_IN_B 37
+
+        // Motor load config
+        #define MOTORLOAD_PWM  -1
+        #define MOTORLOAD_IN_A  6
+        #define MOTORLOAD_IN_B  7
+
 
         // // Motor 1 Parameters
         // #define MOTOR1_PWM  -1
