@@ -21,6 +21,7 @@
 #include <motor.h>
 #include <PIDF.h>
 #include <Utilize.h>
+#include <Encoder.h>
 
 #include <esp32_Encoder.h>    
 #include <ESP32Servo.h>
@@ -63,9 +64,18 @@ rcl_subscription_t cmd_vel_subscriber;
 geometry_msgs__msg__Twist debug_wheel_motor_msg;
 geometry_msgs__msg__Twist cmd_vel_msg;
 
+rcl_publisher_t debug_load_publisher;
+geometry_msgs__msg__Twist debug_load_msg;
 rcl_subscription_t cmd_load_subscriber;
 geometry_msgs__msg__Twist cmd_load_msg;
 
+rcl_subscription_t cmd_encoder_subscriber;
+geometry_msgs__msg__Twist cmd_encoder_msg;
+rcl_publisher_t debug_encoder_publisher;
+geometry_msgs__msg__Twist debug_encoder_msg;
+
+rcl_publisher_t ultra_publisher;
+geometry_msgs__msg__Twist ultra_msg; 
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -76,9 +86,16 @@ rcl_init_options_t init_options;
 
 unsigned long long time_offset = 0;
 unsigned long prev_cmd_time = 0;
+static unsigned long last_sync = 0;
 
-long long ticks_L_front = 0;
-long long ticks_R_front = 0;
+// Encoder
+float rack_tick = 0;
+long last_L_tick = 0;
+long last_R_tick = 0;
+
+// Ultrasonic
+long duration_ultra;
+float distance_cm = 0.0f;
 
 enum states
 {
@@ -94,7 +111,10 @@ Controller motor2(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR2_INV, MO
 Controller motor3(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR3_INV, MOTOR3_BRAKE, MOTOR3_PWM, MOTOR3_IN_A, MOTOR3_IN_B);
 Controller motor4(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR4_INV, MOTOR4_BRAKE, MOTOR4_PWM, MOTOR4_IN_A, MOTOR4_IN_B);
 
-Controller motorload(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS,MOTORLOAD_INV, MOTORLOAD_BRAKE, MOTORLOAD_PWM,MOTORLOAD_IN_A, MOTORLOAD_IN_B);
+Controller motorload(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTORLOAD_INV, MOTORLOAD_BRAKE, MOTORLOAD_PWM,MOTORLOAD_IN_A, MOTORLOAD_IN_B);
+
+// Encoder encoderL(MOTOR1_ENCODER_PIN_A, MOTOR1_ENCODER_PIN_B, false, 26.0f/20.0f);
+// Encoder encoderR(MOTOR2_ENCODER_PIN_A, MOTOR2_ENCODER_PIN_B, false, 26.0f/20.0f);
 
 //------------------------------ < Fuction Prototype > ------------------------------//
 void rclErrorLoop();
@@ -103,15 +123,91 @@ bool createEntities();
 bool destroyEntities();
 struct timespec getTime();
 
+void cmd_vel_callback(const void *);
+void cmd_load_callback(const void *);
+
 void publishData();
 void getEncoderData();
 void MovePower(int, int, int, int);
 void load(int);
 //------------------------------ < Main > -------------------------------------//
 
+
+// ---------------- Encoder Left ----------------
+#define CLK_L 20
+#define DT_L  21
+volatile long encoderL_pos = 0;
+volatile uint8_t lastStateL = 0;
+
+void IRAM_ATTR handleEncoderL() {
+    uint8_t state = (digitalRead(CLK_L) << 1) | digitalRead(DT_L);
+    int8_t change = 0;
+    switch (lastStateL) {
+        case 0b00: if (state == 0b01) change = 1; else if (state == 0b10) change = -1; break;
+        case 0b01: if (state == 0b11) change = 1; else if (state == 0b00) change = -1; break;
+        case 0b11: if (state == 0b10) change = 1; else if (state == 0b01) change = -1; break;
+        case 0b10: if (state == 0b00) change = 1; else if (state == 0b11) change = -1; break;
+    }
+    encoderL_pos += change;
+    lastStateL = state;
+}
+
+long readEncoderL() {
+    noInterrupts();
+    long v = encoderL_pos;
+    interrupts();
+    return v;
+}
+
+// ---------------- Encoder Right ----------------
+#define CLK_R 47
+#define DT_R  48
+volatile long encoderR_pos = 0;
+volatile uint8_t lastStateR = 0;
+
+void IRAM_ATTR handleEncoderR() {
+    uint8_t state = (digitalRead(CLK_R) << 1) | digitalRead(DT_R);
+    int8_t change = 0;
+    switch (lastStateR) {
+        case 0b00: if (state == 0b01) change = 1; else if (state == 0b10) change = -1; break;
+        case 0b01: if (state == 0b11) change = 1; else if (state == 0b00) change = -1; break;
+        case 0b11: if (state == 0b10) change = 1; else if (state == 0b01) change = -1; break;
+        case 0b10: if (state == 0b00) change = 1; else if (state == 0b11) change = -1; break;
+    }
+    encoderR_pos += change;
+    lastStateR = state;
+}
+
+long readEncoderR() {
+    noInterrupts();
+    long v = encoderR_pos;
+    interrupts();
+    return v;
+}
+
+
+
 void setup()
 {
+    // Ultrasonic
+    pinMode(ULTRA_TRIG, OUTPUT);
+    pinMode(ULTRA_ECHO, INPUT);
+    digitalWrite(ULTRA_TRIG, LOW);
 
+    // Encoder Left
+    pinMode(CLK_L, INPUT_PULLUP);
+    pinMode(DT_L, INPUT_PULLUP);
+    lastStateL = (digitalRead(CLK_L) << 1) | digitalRead(DT_L);
+    attachInterrupt(digitalPinToInterrupt(CLK_L), handleEncoderL, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(DT_L), handleEncoderL, CHANGE);
+
+    // Encoder Right
+    pinMode(CLK_R, INPUT_PULLUP);
+    pinMode(DT_R, INPUT_PULLUP);
+    lastStateR = (digitalRead(CLK_R) << 1) | digitalRead(DT_R);
+    attachInterrupt(digitalPinToInterrupt(CLK_R), handleEncoderR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(DT_R), handleEncoderR, CHANGE);
+    
     Serial.begin(115200);
     #ifdef MICROROS_WIFI
         
@@ -125,11 +221,15 @@ void setup()
 
 void loop()
 {   
+    if (millis() - last_sync > 10000) {
+        syncTime();
+        last_sync = millis();
+    }
     switch (state)
     {
     case WAITING_AGENT:
         // EXECUTE_EVERY_N_MS(500, state = (RMW_RET_OK == rmw_uros_ping_agent(100, 1)) ? AGENT_AVAILABLE : WAITING_AGENT;);
-        EXECUTE_EVERY_N_MS(1500, state = (RMW_RET_OK == rmw_uros_ping_agent(1000, 10)) ? AGENT_AVAILABLE : WAITING_AGENT;);
+        EXECUTE_EVERY_N_MS(500, state = (RMW_RET_OK == rmw_uros_ping_agent(500, 4)) ? AGENT_AVAILABLE : WAITING_AGENT;);
         break;
     case AGENT_AVAILABLE:
         state = (true == createEntities()) ? AGENT_CONNECTED : WAITING_AGENT;
@@ -139,10 +239,10 @@ void loop()
         }
         break;
     case AGENT_CONNECTED:
-        EXECUTE_EVERY_N_MS(700, state = (RMW_RET_OK == rmw_uros_ping_agent(600, 5)) ? AGENT_CONNECTED : AGENT_DISCONNECTED;);
+        EXECUTE_EVERY_N_MS(250, state = (RMW_RET_OK == rmw_uros_ping_agent(300, 3)) ? AGENT_CONNECTED : AGENT_DISCONNECTED;);
         if (state == AGENT_CONNECTED)
         {
-            rclc_executor_spin_some(&executor, RCL_MS_TO_NS(500));
+            rclc_executor_spin_some(&executor, RCL_MS_TO_NS(150));
         }
         break;
     case AGENT_DISCONNECTED:
@@ -157,6 +257,9 @@ void loop()
 
 //------------------------------ < Fuction > -------------------------------------//
 
+
+// Motor Move
+
 void MovePower(int Motor1Speed, int Motor2Speed, int Motor3Speed, int Motor4Speed)
 {
     Motor1Speed = constrain(Motor1Speed, PWM_Min, PWM_Max);
@@ -170,29 +273,12 @@ void MovePower(int Motor1Speed, int Motor2Speed, int Motor3Speed, int Motor4Spee
     motor4.spin(Motor4Speed);
 }
 
-void load(int MotorloadSpeed)
-{
-    MotorloadSpeed = constrain(MotorloadSpeed,  PWM_Min, PWM_Max);
-    motorload.spin(MotorloadSpeed);
-}
-
-void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
-{
-    RCLC_UNUSED(last_call_time);
-    if (timer != NULL)
-    {
-        getEncoderData();
-        publishData();
-    }
-}
-
-void cmd_vel_callback(const void * msgin) 
+void cmd_vel_callback(const void *msgin) 
 {
     const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
     float V_x = msg->linear.x;
-    float V_y = 0.0;
     float W_z = msg->angular.z;
-    float d = max(abs(V_x) + abs(V_y) + abs(W_z), (float) PWM_Max);
+    float d = max(abs(V_x) + abs(W_z), (float) PWM_Max);
     int fl = (V_x - W_z)/d * (float) PWM_Max;
     int fr = (V_x + W_z)/d * (float) PWM_Max;
     int bl = (V_x - W_z)/d * (float) PWM_Max;
@@ -201,13 +287,58 @@ void cmd_vel_callback(const void * msgin)
               bl, br);
 }
 
-void cmd_load_callback(const void * msgin) 
+
+// Motor load
+
+void load(int MotorloadSpeed)
 {
-    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
-    int load_speed = (int) msg->linear.x;   // อ่านค่าจาก Python
-    load(load_speed);                       // เรียกฟังก์ชัน load ของคุณ
+    MotorloadSpeed = constrain(MotorloadSpeed,  PWM_Min, PWM_Max);
+    motorload.spin(MotorloadSpeed);
 }
 
+void cmd_load_callback(const void *msgin) 
+{
+    // const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+    // int load_speed = (int) msg->linear.x;
+    load(cmd_load_msg.linear.x);
+}
+
+// Ultrasonic
+
+void publishUltra()
+{
+    // เก็บค่าระยะ sensor
+    ultra_msg.linear.x = distance_cm;
+
+    rcl_publish(&ultra_publisher, &ultra_msg, NULL);
+}
+
+float readUltrasonicCM() {
+    digitalWrite(ULTRA_TRIG, LOW);
+    delayMicroseconds(2);
+    digitalWrite(ULTRA_TRIG, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(ULTRA_TRIG, LOW);
+
+    long duration = pulseIn(ULTRA_ECHO, HIGH, 30000); // timeout 30ms
+    if (duration == 0) {
+        return -1.0f; // ไม่มี echo
+    }
+    return (duration * 0.0343f) / 2.0f; // cm
+}
+
+
+void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
+{
+    RCLC_UNUSED(last_call_time);
+    if (timer != NULL)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+    {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+        getEncoderData();
+        publishData();
+        distance_cm = readUltrasonicCM();
+        publishUltra();  
+    }
+}
 
 bool createEntities()
 {
@@ -249,9 +380,33 @@ bool createEntities()
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "/teelek/cmd_load"));
 
+    RCCHECK(rclc_publisher_init_default(
+        &debug_load_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "debug/load/cmd_load"));
+
+    RCCHECK(rclc_publisher_init_default(
+        &debug_encoder_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "teelek/debug/encoder"));
+
+    RCCHECK(rclc_subscription_init_default(
+        &cmd_encoder_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/teelek/cmd_encoder"));
+
+    RCCHECK(rclc_publisher_init_default(
+        &ultra_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "teelek/ultrasonic"));
+
         
-    // create timer for control loop 1000/40 Hz
-    const unsigned int control_timeout = 40;
+    // create timer for control loop 1000/20 Hz
+    const unsigned int control_timeout = 30;
     RCCHECK(rclc_timer_init_default(
         &control_timer,
         &support,
@@ -270,6 +425,13 @@ bool createEntities()
         &cmd_vel_callback,
         ON_NEW_DATA));
 
+    RCCHECK(rclc_executor_add_subscription(
+        &executor,
+        &cmd_load_subscriber,
+        &cmd_load_msg,
+        &cmd_load_callback,
+        ON_NEW_DATA));
+
     syncTime();
 
     return true;
@@ -286,6 +448,11 @@ bool destroyEntities()
     
     rcl_subscription_fini(&cmd_load_subscriber, &node);
 
+    rcl_publisher_fini(&debug_load_publisher, &node);
+
+    rcl_publisher_fini(&debug_encoder_publisher, &node);
+
+
     rcl_node_fini(&node);
     rcl_timer_fini(&control_timer);
     rclc_executor_fini(&executor);
@@ -296,39 +463,51 @@ bool destroyEntities()
 
 void getEncoderData()
 {
-    // #ifdef teelek_karake
-    // // Get encoder data
-    // rpm_front_L = Encoder1.getRPM();
-    // rpm_front_R = Encoder2.getRPM();
-    // rpm_rear_left_L = Encoder3.getRPM();
-    // rpm_rear_left_R = Encoder4.getRPM();
+    // อ่านค่าจาก encoder ซ้ายและขวา
+    long curL = readEncoderL();
+    long curR = -readEncoderR();
 
-    // // debug_wheel_motorRPM_msg.linear.x = rpm_front_L;
-    // // debug_wheel_motorRPM_msg.linear.y = rpm_front_R;
-    // // debug_wheel_motorRPM_msg.linear.z = rpm_rear_left_L;
-    // // debug_wheel_motorRPM_msg.angular.x = rpm_rear_left_R;
-    // #elif teelek_katsu
-    // rpm_rear_right_L = Encoder5.getRPM();
-    // rpm_rear_right_R = Encoder6.getRPM();
+    // คำนวณ ticks ที่เปลี่ยนไป
+    long diff_L_ticks = curL - last_L_tick;
+    long diff_R_ticks = curR - last_R_tick;
 
-    // // debug_wheel_motorRPM_msg.angular.y = rpm_rear_right_L;
-    // // debug_wheel_motorRPM_msg.angular.z = rpm_rear_right_R;
-    // #endif
+    // อัปเดตค่าเก็บ tick ล่าสุด
+    last_L_tick = curL;
+    last_R_tick = curR;
 
-    // // debug_wheel_encoder_msg.linear.x = 0.0;
-    // // debug_wheel_encoder_msg.linear.y = 0.0;
-    // // debug_wheel_encoder_msg.linear.z = 0.0;
-    // // debug_wheel_encoder_msg.linear.z = Encoder3.getRPM();
+    // ---------------- Logic เลือกฝั่งที่เชื่อถือได้ ----------------
+    if (abs(diff_L_ticks) > 3 && abs(diff_L_ticks) >= abs(diff_R_ticks)) {
+        // ถ้าฝั่งซ้ายมีการเปลี่ยนแปลงชัดเจน → ใช้ซ้ายเป็นตัวแทน
+        diff_R_ticks = diff_L_ticks;
+        curR = curL;
+    } 
+    else if (abs(diff_R_ticks) > 3 && abs(diff_R_ticks) > abs(diff_L_ticks)) {
+        // ถ้าฝั่งขวามีการเปลี่ยนแปลงชัดเจน → ใช้ขวาเป็นตัวแทน
+        diff_L_ticks = diff_R_ticks;
+        curL = curR;
+    }
 
+    // ใช้ diff_L_ticks เป็น rack_tick เพราะ synced แล้ว
+    rack_tick = diff_L_ticks;
+
+    // ส่งค่าออก ROS debug
+    debug_encoder_msg.linear.x = curL;      
+    debug_encoder_msg.linear.y = curR;      
+    debug_encoder_msg.linear.z = rack_tick; 
 }
+
+
 
 void publishData()
 {
     debug_wheel_motor_msg.linear.x = cmd_vel_msg.linear.x;
     debug_wheel_motor_msg.linear.y = cmd_vel_msg.linear.y;
     debug_wheel_motor_msg.angular.z = cmd_vel_msg.angular.z;
-    struct timespec time_stamp = getTime();
+    debug_load_msg.linear.x = cmd_load_msg.linear.x;
+
+    rcl_publish(&debug_load_publisher, &debug_load_msg, NULL);
     rcl_publish(&debug_cmd_vel_publisher, &debug_wheel_motor_msg, NULL);
+    rcl_publish(&debug_encoder_publisher, &debug_encoder_msg, NULL);
 }
 
 void syncTime()

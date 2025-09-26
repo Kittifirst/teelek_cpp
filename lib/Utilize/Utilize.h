@@ -47,8 +47,8 @@ static float NormalizeDegs(float degs) {
     return degs;
 }
 
-static byte SigNum(float number) {
-    return (byte) (number == 0 ? 0 : (number < 0 ? -1 : 1));
+static int SigNum(float number) {
+    return (int) (number == 0 ? 0 : (number < 0 ? -1 : 1));
 }
 
 float MPSToRPM(float mps, float wheel_diameter) {
