@@ -19,6 +19,7 @@
     #define ENCODER_TICKS_PER_REV2 COUNTS_PER_REV2
 
     #define WHEEL_DIAMETER 0.040                                           // wheel's diameter in meters
+    
     // #define LR_WHEELS_DISTANCE 0.335                                        // distance between left and right wheels
     #define PWM_BITS 10                                                     // PWM Resolution of the microcontroller
     #define PWM_FREQUENCY 20000                                             // PWM Frequency
@@ -39,7 +40,7 @@
     #define MOTOR3_BRAKE true
     #define MOTOR4_BRAKE true
     #define MOTORLOAD_BRAKE true
-    
+
     // Ultrasonic
     #define ULTRA_TRIG 12
     #define ULTRA_ECHO 13
@@ -53,49 +54,46 @@
 
         // Motor 2 Parameters
         #define MOTOR2_PWM  -1
-        #define MOTOR2_IN_A 1
-        #define MOTOR2_IN_B 2 
+        #define MOTOR2_IN_A 35
+        #define MOTOR2_IN_B 36
 
         // Motor 3 Parameters
         #define MOTOR3_PWM  -1
-        #define MOTOR3_IN_A 15
-        #define MOTOR3_IN_B 16
+        #define MOTOR3_IN_A 1
+        #define MOTOR3_IN_B 2
 
         // Motor 4 Parameters
         #define MOTOR4_PWM  -1
-        #define MOTOR4_IN_A 38
-        #define MOTOR4_IN_B 37
+        #define MOTOR4_IN_A 15
+        #define MOTOR4_IN_B 16
 
-        // Motor load config
-        #define MOTORLOAD_PWM  -1
-        #define MOTORLOAD_IN_A  4
-        #define MOTORLOAD_IN_B  5
+         // Encoder Rack Left
+        #define CLK_L 20
+        #define DT_L  21
+        
+        // Encoder Rack Left
+        #define CLK_R 47
+        #define DT_R  48
 
-        // Encoder (ใช้แค่ 2 ข้าง)
-        #define MOTOR1_ENCODER_INCRIMENT -1
-        #define MOTOR1_ENCODER_PIN_A 20
-        #define MOTOR1_ENCODER_PIN_B 21
-        #define MOTOR1_ENCODER_RATIO 1
-
-        #define MOTOR2_ENCODER_INCRIMENT -1
-        #define MOTOR2_ENCODER_PIN_A 47
-        #define MOTOR2_ENCODER_PIN_B 48
-        #define MOTOR2_ENCODER_RATIO 1
+        //Encoder 4 wheels
+        #define Encoder_LF 41
+        #define Encoder_LF 42
+        #define Encoder_LB 39
+        #define Encoder_LB 40
+        #define Encoder_RB 38
+        #define Encoder_RB 37
+        #define Encoder_RF 13
+        #define Encoder_RF 14
     #endif
 
 
 
     #ifdef teelek_katsu
 
-        // Motor 5 Parameters
-        #define MOTOR5_PWM  -1
-        #define MOTOR5_IN_A 25
-        #define MOTOR5_IN_B 26
-
-        // Motor 6 Parameters
-        #define MOTOR6_PWM  -1
-        #define MOTOR6_IN_A 32
-        #define MOTOR6_IN_B 33
+        // Motor load config
+        #define MOTORLOAD_PWM  -1
+        #define MOTORLOAD_IN_A  4
+        #define MOTORLOAD_IN_B  5
 
         // Servo Parameter
         #define SERVO_BASE_PIN 13

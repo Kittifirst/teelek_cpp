@@ -23,7 +23,7 @@
 #include <Utilize.h>
 #include <Encoder.h>
 
-#include <esp32_Encoder.h>    
+#include <esp32_Encoder.h>     //Encoder 4 wheels
 #include <ESP32Servo.h>
 
 #define RCCHECK(fn)                  \
@@ -64,18 +64,10 @@ rcl_subscription_t cmd_vel_subscriber;
 geometry_msgs__msg__Twist debug_wheel_motor_msg;
 geometry_msgs__msg__Twist cmd_vel_msg;
 
-rcl_publisher_t debug_load_publisher;
-geometry_msgs__msg__Twist debug_load_msg;
-rcl_subscription_t cmd_load_subscriber;
-geometry_msgs__msg__Twist cmd_load_msg;
-
 rcl_subscription_t cmd_encoder_subscriber;
 geometry_msgs__msg__Twist cmd_encoder_msg;
 rcl_publisher_t debug_encoder_publisher;
 geometry_msgs__msg__Twist debug_encoder_msg;
-
-rcl_publisher_t ultra_publisher;
-geometry_msgs__msg__Twist ultra_msg; 
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -88,14 +80,10 @@ unsigned long long time_offset = 0;
 unsigned long prev_cmd_time = 0;
 static unsigned long last_sync = 0;
 
-// Encoder
+// Encoder rack
 float rack_tick = 0;
 long last_L_tick = 0;
 long last_R_tick = 0;
-
-// Ultrasonic
-long duration_ultra;
-float distance_cm = 0.0f;
 
 enum states
 {
@@ -111,10 +99,11 @@ Controller motor2(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR2_INV, MO
 Controller motor3(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR3_INV, MOTOR3_BRAKE, MOTOR3_PWM, MOTOR3_IN_A, MOTOR3_IN_B);
 Controller motor4(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR4_INV, MOTOR4_BRAKE, MOTOR4_PWM, MOTOR4_IN_A, MOTOR4_IN_B);
 
-Controller motorload(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTORLOAD_INV, MOTORLOAD_BRAKE, MOTORLOAD_PWM,MOTORLOAD_IN_A, MOTORLOAD_IN_B);
-
 // Encoder encoderL(MOTOR1_ENCODER_PIN_A, MOTOR1_ENCODER_PIN_B, false, 26.0f/20.0f);
 // Encoder encoderR(MOTOR2_ENCODER_PIN_A, MOTOR2_ENCODER_PIN_B, false, 26.0f/20.0f);
+
+// Encoder 4 wheels
+// esp32_Encoder encoder(MOTOR_ENCODER_PIN_A, MOTOR_ENCODER_PIN_B, COUNTS_PER_REV, MOTOR_ENCODER_INV, MOTOR_ENCODER_RATIO, WHEEL_DIAMETER);
 
 //------------------------------ < Fuction Prototype > ------------------------------//
 void rclErrorLoop();
@@ -189,11 +178,6 @@ long readEncoderR() {
 
 void setup()
 {
-    // Ultrasonic
-    pinMode(ULTRA_TRIG, OUTPUT);
-    pinMode(ULTRA_ECHO, INPUT);
-    digitalWrite(ULTRA_TRIG, LOW);
-
     // Encoder Left
     pinMode(CLK_L, INPUT_PULLUP);
     pinMode(DT_L, INPUT_PULLUP);
@@ -287,56 +271,13 @@ void cmd_vel_callback(const void *msgin)
               bl, br);
 }
 
-
-// Motor load
-
-void load(int MotorloadSpeed)
-{
-    MotorloadSpeed = constrain(MotorloadSpeed,  PWM_Min, PWM_Max);
-    motorload.spin(MotorloadSpeed);
-}
-
-void cmd_load_callback(const void *msgin) 
-{
-    // const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
-    // int load_speed = (int) msg->linear.x;
-    load(cmd_load_msg.linear.x);
-}
-
-// Ultrasonic
-
-void publishUltra()
-{
-    // เก็บค่าระยะ sensor
-    ultra_msg.linear.x = distance_cm;
-
-    rcl_publish(&ultra_publisher, &ultra_msg, NULL);
-}
-
-float readUltrasonicCM() {
-    digitalWrite(ULTRA_TRIG, LOW);
-    delayMicroseconds(2);
-    digitalWrite(ULTRA_TRIG, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(ULTRA_TRIG, LOW);
-
-    long duration = pulseIn(ULTRA_ECHO, HIGH, 30000); // timeout 30ms
-    if (duration == 0) {
-        return -1.0f; // ไม่มี echo
-    }
-    return (duration * 0.0343f) / 2.0f; // cm
-}
-
-
 void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
 {
     RCLC_UNUSED(last_call_time);
     if (timer != NULL)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
     {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
         getEncoderData();
-        publishData();
-        distance_cm = readUltrasonicCM();
-        publishUltra();  
+        publishData(); 
     }
 }
 
@@ -374,17 +315,6 @@ bool createEntities()
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "/teelek/cmd_move"));
 
-    RCCHECK(rclc_subscription_init_default(
-        &cmd_load_subscriber,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "/teelek/cmd_load"));
-
-    RCCHECK(rclc_publisher_init_default(
-        &debug_load_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "debug/load/cmd_load"));
 
     RCCHECK(rclc_publisher_init_default(
         &debug_encoder_publisher,
@@ -397,13 +327,6 @@ bool createEntities()
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "/teelek/cmd_encoder"));
-
-    RCCHECK(rclc_publisher_init_default(
-        &ultra_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "teelek/ultrasonic"));
-
         
     // create timer for control loop 1000/20 Hz
     const unsigned int control_timeout = 30;
@@ -425,13 +348,6 @@ bool createEntities()
         &cmd_vel_callback,
         ON_NEW_DATA));
 
-    RCCHECK(rclc_executor_add_subscription(
-        &executor,
-        &cmd_load_subscriber,
-        &cmd_load_msg,
-        &cmd_load_callback,
-        ON_NEW_DATA));
-
     syncTime();
 
     return true;
@@ -446,10 +362,6 @@ bool destroyEntities()
 
     rcl_publisher_fini(&debug_cmd_vel_publisher, &node);
     
-    rcl_subscription_fini(&cmd_load_subscriber, &node);
-
-    rcl_publisher_fini(&debug_load_publisher, &node);
-
     rcl_publisher_fini(&debug_encoder_publisher, &node);
 
 
@@ -503,9 +415,7 @@ void publishData()
     debug_wheel_motor_msg.linear.x = cmd_vel_msg.linear.x;
     debug_wheel_motor_msg.linear.y = cmd_vel_msg.linear.y;
     debug_wheel_motor_msg.angular.z = cmd_vel_msg.angular.z;
-    debug_load_msg.linear.x = cmd_load_msg.linear.x;
 
-    rcl_publish(&debug_load_publisher, &debug_load_msg, NULL);
     rcl_publish(&debug_cmd_vel_publisher, &debug_wheel_motor_msg, NULL);
     rcl_publish(&debug_encoder_publisher, &debug_encoder_msg, NULL);
 }
