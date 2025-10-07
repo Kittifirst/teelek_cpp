@@ -25,6 +25,7 @@
 
 #include <esp32_Encoder.h>     //Encoder 4 wheels
 #include <ESP32Servo.h>
+#include <esp32_hardware.h>
 
 #define RCCHECK(fn)                  \
     {                                \
@@ -64,10 +65,14 @@ rcl_subscription_t cmd_vel_subscriber;
 geometry_msgs__msg__Twist debug_wheel_motor_msg;
 geometry_msgs__msg__Twist cmd_vel_msg;
 
-rcl_subscription_t cmd_encoder_subscriber;
-geometry_msgs__msg__Twist cmd_encoder_msg;
 rcl_publisher_t debug_encoder_publisher;
 geometry_msgs__msg__Twist debug_encoder_msg;
+
+rcl_publisher_t debug_encoder_wheels_publisher;
+std_msgs__msg__Float32MultiArray debug_encoder_wheels_msg;
+
+rcl_subscription_t cmd_resetencoder_subscriber;
+geometry_msgs__msg__Twist cmd_resetencoder_msg;
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -84,6 +89,17 @@ static unsigned long last_sync = 0;
 float rack_tick = 0;
 long last_L_tick = 0;
 long last_R_tick = 0;
+
+// Encoder wheels
+float wheel_ticks[4] = {0};   // LF, LB, RF, RB
+long lastLF = 0;
+long lastLB = 0;
+long lastRF = 0;
+long lastRB = 0;
+
+long offsetLF = 0, offsetLB = 0, offsetRF = 0, offsetRB = 0;
+long totalLF = 0, totalLB = 0, totalRF = 0, totalRB = 0; // ✅ tick สะสม
+
 
 enum states
 {
@@ -103,7 +119,10 @@ Controller motor4(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTOR4_INV, MO
 // Encoder encoderR(MOTOR2_ENCODER_PIN_A, MOTOR2_ENCODER_PIN_B, false, 26.0f/20.0f);
 
 // Encoder 4 wheels
-// esp32_Encoder encoder(MOTOR_ENCODER_PIN_A, MOTOR_ENCODER_PIN_B, COUNTS_PER_REV, MOTOR_ENCODER_INV, MOTOR_ENCODER_RATIO, WHEEL_DIAMETER);
+esp32_Encoder encLF(Encoder_LF_A, Encoder_LF_B, COUNTS_PER_REV, ENCODER_INV_LF, GEAR_RATIO, WHEEL_DIAMETER);
+esp32_Encoder encLB(Encoder_LB_A, Encoder_LB_B, COUNTS_PER_REV, ENCODER_INV_LB, GEAR_RATIO, WHEEL_DIAMETER);
+esp32_Encoder encRF(Encoder_RF_A, Encoder_RF_B, COUNTS_PER_REV, ENCODER_INV_RF, GEAR_RATIO, WHEEL_DIAMETER);
+esp32_Encoder encRB(Encoder_RB_A, Encoder_RB_B, COUNTS_PER_REV, ENCODER_INV_RB, GEAR_RATIO, WHEEL_DIAMETER);
 
 //------------------------------ < Fuction Prototype > ------------------------------//
 void rclErrorLoop();
@@ -114,8 +133,10 @@ struct timespec getTime();
 
 void cmd_vel_callback(const void *);
 void cmd_load_callback(const void *);
+void cmd_reset_encoder_callback(const void *msgin);
 
 void publishData();
+void getEncoderWheelsTick(); 
 void getEncoderData();
 void MovePower(int, int, int, int);
 void load(int);
@@ -277,6 +298,7 @@ void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
     if (timer != NULL)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
     {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
         getEncoderData();
+        getEncoderWheelsTick();
         publishData(); 
     }
 }
@@ -322,11 +344,21 @@ bool createEntities()
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "teelek/debug/encoder"));
 
+    RCCHECK(rclc_publisher_init_default(
+        &debug_encoder_wheels_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+        "teelek/debug/encoder_wheels"));
+
     RCCHECK(rclc_subscription_init_default(
-        &cmd_encoder_subscriber,
+        &cmd_resetencoder_subscriber,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "/teelek/cmd_encoder"));
+        "/teelek/cmd_resetencoder"));
+
+    // ภายใน createEntities() หลังจากประกาศ publisher
+    rosidl_runtime_c__float__Sequence__init(&debug_encoder_wheels_msg.data, 4);
+
         
     // create timer for control loop 1000/20 Hz
     const unsigned int control_timeout = 30;
@@ -347,6 +379,13 @@ bool createEntities()
         &cmd_vel_msg,
         &cmd_vel_callback,
         ON_NEW_DATA));
+ 
+    RCCHECK(rclc_executor_add_subscription(
+        &executor,
+        &cmd_resetencoder_subscriber,
+        &cmd_resetencoder_msg,
+        &cmd_reset_encoder_callback,
+        ON_NEW_DATA));
 
     syncTime();
 
@@ -364,6 +403,7 @@ bool destroyEntities()
     
     rcl_publisher_fini(&debug_encoder_publisher, &node);
 
+    rcl_publisher_fini(&debug_encoder_wheels_publisher, &node);
 
     rcl_node_fini(&node);
     rcl_timer_fini(&control_timer);
@@ -400,7 +440,7 @@ void getEncoderData()
     }
 
     // ใช้ diff_L_ticks เป็น rack_tick เพราะ synced แล้ว
-    rack_tick = diff_L_ticks;
+    rack_tick = diff_L_ticks;   
 
     // ส่งค่าออก ROS debug
     debug_encoder_msg.linear.x = curL;      
@@ -408,7 +448,41 @@ void getEncoderData()
     debug_encoder_msg.linear.z = rack_tick; 
 }
 
+void getEncoderWheelsTick() {
+    long curLF = encLF.read();
+    long curLB = encLB.read();
+    long curRF = encRF.read();
+    long curRB = encRB.read();
 
+    debug_encoder_wheels_msg.data.data[0] = curLF - offsetLF;
+    debug_encoder_wheels_msg.data.data[1] = curLB - offsetLB;
+    debug_encoder_wheels_msg.data.data[2] = curRF - offsetRF;
+    debug_encoder_wheels_msg.data.data[3] = curRB - offsetRB;
+}
+
+
+void resetEncoderOffset()
+{
+    offsetLF = encLF.read();
+    offsetLB = encLB.read();
+    offsetRF = encRF.read();
+    offsetRB = encRB.read();
+
+    // Set current message to zero
+    debug_encoder_wheels_msg.data.data[0] = 0;
+    debug_encoder_wheels_msg.data.data[1] = 0;
+    debug_encoder_wheels_msg.data.data[2] = 0;
+    debug_encoder_wheels_msg.data.data[3] = 0;
+}
+
+void cmd_reset_encoder_callback(const void *msgin)
+{
+    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+    if (msg->linear.x > 0.5)
+    {
+        resetEncoderOffset();
+    }
+}
 
 void publishData()
 {
@@ -418,6 +492,7 @@ void publishData()
 
     rcl_publish(&debug_cmd_vel_publisher, &debug_wheel_motor_msg, NULL);
     rcl_publish(&debug_encoder_publisher, &debug_encoder_msg, NULL);
+    rcl_publish(&debug_encoder_wheels_publisher, &debug_encoder_wheels_msg, NULL);
 }
 
 void syncTime()
