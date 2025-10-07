@@ -109,9 +109,9 @@
         #define MOTORLOAD_IN_B  5
 
         // Servo Parameter
-        #define SERVO_PIN 13
-        #define SERVO_MIN_ANGLE 0
-        #define SERVO_MAX_ANGLE 180
+        #define SERVO_PIN 39
+        #define SERVO_MIN_PULSE 800 
+        #define SERVO_MAX_PULSE 3200
     #endif
 
     // INVERT ENCODER DIRECTIONS (ใช้เฉพาะ 2 ข้าง)
