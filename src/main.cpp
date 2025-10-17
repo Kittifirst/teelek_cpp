@@ -74,11 +74,17 @@
     rcl_subscription_t cmd_resetencoder_subscriber;
     geometry_msgs__msg__Twist cmd_resetencoder_msg;
 #elif teelek_katsu
-    rcl_subscription_t cmd_load_subscriber;
-    geometry_msgs__msg__Twist cmd_load_msg;
+    rcl_subscription_t cmd_loadleft_subscriber;
+    geometry_msgs__msg__Twist cmd_loadleft_msg;
 
-    rcl_publisher_t debug_load_publisher;
-    geometry_msgs__msg__Twist debug_load_msg;
+    rcl_publisher_t debug_loadleft_publisher;
+    geometry_msgs__msg__Twist debug_loadleft_msg;
+
+    rcl_subscription_t cmd_loadright_subscriber;
+    geometry_msgs__msg__Twist cmd_loadright_msg;
+
+    rcl_publisher_t debug_loadright_publisher;
+    geometry_msgs__msg__Twist debug_loadright_msg;
 
     rcl_subscription_t cmd_servo_subscriber;
     geometry_msgs__msg__Twist cmd_servo_msg;
@@ -113,7 +119,6 @@ long lastRB = 0;
 long offsetLF = 0, offsetLB = 0, offsetRF = 0, offsetRB = 0;
 long totalLF = 0, totalLB = 0, totalRF = 0, totalRB = 0; // ✅ tick สะสม
 
-
 enum states
 {
     WAITING_AGENT,
@@ -134,8 +139,13 @@ enum states
     esp32_Encoder encRF(Encoder_RF_A, Encoder_RF_B, COUNTS_PER_REV, ENCODER_INV_RF, GEAR_RATIO, WHEEL_DIAMETER);
     esp32_Encoder encRB(Encoder_RB_A, Encoder_RB_B, COUNTS_PER_REV, ENCODER_INV_RB, GEAR_RATIO, WHEEL_DIAMETER);
 #elif teelek_katsu
-    Controller motorload(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTORLOAD_INV, MOTORLOAD_BRAKE, MOTORLOAD_PWM, MOTORLOAD_IN_A, MOTORLOAD_IN_B);
+    Controller motorloadleft(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTORLOAD_INV, MOTORLOAD_BRAKE, MOTORLOAD_LEFT_PWM, MOTORLOAD_LEFT_IN_A, MOTORLOAD_LEFT_IN_B);
+    Controller motorloadright(Controller::Drive2pin, PWM_FREQUENCY, PWM_BITS, MOTORLOAD_INV, MOTORLOAD_BRAKE, MOTORLOAD_RIGHT_PWM, MOTORLOAD_RIGHT_IN_A, MOTORLOAD_RIGHT_IN_B);
     Servo servo_dig;
+    bool servo_attached = false;
+    float servo_pulse = -1;
+    unsigned long servo_detach_time = 0;
+    bool servo_detach_pending = false;
 #endif
 
 //------------------------------ < Fuction Prototype > ------------------------------//
@@ -146,19 +156,23 @@ bool destroyEntities();
 struct timespec getTime();
 
 void cmd_vel_callback(const void *);
-void cmd_load_callback(const void *);
+void cmd_loadleft_callback(const void *);
+void cmd_loadright_callback(const void *);
 void cmd_reset_encoder_callback(const void *msgin);
 
-void load(int MotorloadSpeed);
+void loadleft(int MotorloadSpeed);
+void loadright(int MotorloadSpeed);
 void controlServo(float pulse);
-void cmd_load_callback(const void *msgin);
+void cmd_loadleft_callback(const void *msgin);
+void cmd_loadright_callback(const void *msgin);
 void cmd_servo_callback(const void *msgin);
 
 void publishData();
 void getEncoderWheelsTick(); 
 void getEncoderData();
 void MovePower(int, int, int, int);
-void load(int);
+void leftload(int);
+void rightload(int);
 //------------------------------ < Main > -------------------------------------//
 
 #ifdef teelek_karake
@@ -246,8 +260,9 @@ void load(int);
     }
 #elif teelek_katsu
     void setup() {
+        // servo_dig.setPeriodHertz(50);`
         servo_dig.attach(SERVO_PIN, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
-        servo_dig.writeMicroseconds(900);
+        servo_dig.writeMicroseconds(800);
 
         Serial.begin(115200);
         #ifdef MICROROS_WIFI
@@ -439,7 +454,6 @@ void load(int);
         debug_encoder_wheels_msg.data.data[3] = curRB - offsetRB;
     }
 
-
     void resetEncoderOffset()
     {
         offsetLF = encLF.read();
@@ -453,7 +467,6 @@ void load(int);
         debug_encoder_wheels_msg.data.data[2] = 0;
         debug_encoder_wheels_msg.data.data[3] = 0;
     }
-
     void cmd_reset_encoder_callback(const void *msgin)
     {
         const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
@@ -462,6 +475,7 @@ void load(int);
             resetEncoderOffset();
         }
     }
+
 #elif teelek_katsu
     void controlCallback(rcl_timer_t *timer, int64_t last_call_time)
     {
@@ -469,24 +483,65 @@ void load(int);
         if (timer != NULL)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
         {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
             publishData(); 
+            if (servo_detach_pending) {
+                if (millis() - servo_detach_time >= 5000) {
+                    servo_dig.detach();
+                    servo_attached = false;
+                    servo_detach_pending = false;
+                } else if (servo_attached) {
+                    // ระหว่างรอ 5 วิ ให้ส่ง PWM เดิมไว้ก่อน
+                    servo_dig.writeMicroseconds(servo_pulse);
+                }
+            } else if (servo_attached) {
+                // refresh PWM ป้องกัน servo ย้วย
+                servo_dig.writeMicroseconds(servo_pulse);
+            }
         }
     }
 
-    void load(int MotorloadSpeed) {
+    void loadleft(int MotorloadSpeed) {
         MotorloadSpeed = constrain(MotorloadSpeed, PWM_Min, PWM_Max);
-        motorload.spin(MotorloadSpeed);
+        motorloadleft.spin(MotorloadSpeed);
+    }
+
+    void loadright(int MotorloadSpeed) {
+        MotorloadSpeed = constrain(MotorloadSpeed, PWM_Min, PWM_Max);
+        motorloadright.spin(MotorloadSpeed);
     }
 
     void controlServo(float pulse) {
-        pulse = constrain(pulse, 800, 3200);
-        servo_dig.writeMicroseconds(pulse);
+        servo_pulse = pulse;
+
+        if (pulse <= 800) {
+            // สั่ง 800 → เริ่มนับเวลา 5 วินาทีก่อน detach
+            if (servo_attached && !servo_detach_pending) {
+                servo_detach_time = millis();
+                servo_detach_pending = true;
+            }
+        } else {
+            // ถ้ามีการสั่งค่า > 800 → ยกเลิกการ detach ที่รอไว้
+            servo_detach_pending = false;
+
+            // Attach servo ถ้ายังไม่ได้ต่อ
+            if (!servo_attached) servo_dig.attach(SERVO_PIN);
+            servo_attached = true;
+
+            // ส่ง PWM ให้ servo ทำงาน
+            servo_dig.writeMicroseconds(pulse);
+        }
     }
 
     // -------------------- Callbacks --------------------
-    void cmd_load_callback(const void *msgin) {
+    void cmd_loadleft_callback(const void *msgin) {
         const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
-        cmd_load_msg = *msg;
-        load(msg->linear.x);
+        cmd_loadleft_msg = *msg;
+        loadleft(msg->linear.x);
+    }
+
+    void cmd_loadright_callback(const void *msgin) {
+        const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+        cmd_loadright_msg = *msg;
+        loadright(msg->linear.x);
     }
 
     void cmd_servo_callback(const void *msgin) {
@@ -544,10 +599,16 @@ bool createEntities()
 
     #elif teelek_katsu
         if (rclc_publisher_init_default(
-                &debug_load_publisher,
+                &debug_loadleft_publisher,
                 &node,
                 ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-                "/teelek/debug/load") != RCL_RET_OK) return false;
+                "/teelek/debug/loadleft") != RCL_RET_OK) return false;
+
+        if (rclc_publisher_init_default(
+                &debug_loadright_publisher,
+                &node,
+                ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+                "/teelek/debug/loadright") != RCL_RET_OK) return false;
 
         if (rclc_publisher_init_default(
                 &debug_servo_publisher,
@@ -579,10 +640,16 @@ bool createEntities()
 
     #elif teelek_katsu
         if (rclc_subscription_init_default(
-                &cmd_load_subscriber,
+                &cmd_loadleft_subscriber,
                 &node,
                 ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-                "/teelek/cmd_load") != RCL_RET_OK) return false;
+                "/teelek/cmd_loadleft") != RCL_RET_OK) return false;
+        
+        if (rclc_subscription_init_default(
+                &cmd_loadright_subscriber,
+                &node,
+                ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+                "/teelek/cmd_loadright") != RCL_RET_OK) return false;
 
         if (rclc_subscription_init_default(
                 &cmd_servo_subscriber,
@@ -590,8 +657,11 @@ bool createEntities()
                 ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
                 "/teelek/cmd_servo") != RCL_RET_OK) return false;
 
-        if (rclc_executor_add_subscription(&executor, &cmd_load_subscriber, &cmd_load_msg,
-            &cmd_load_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
+        if (rclc_executor_add_subscription(&executor, &cmd_loadleft_subscriber, &cmd_loadleft_msg,
+            &cmd_loadleft_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
+        
+        if (rclc_executor_add_subscription(&executor, &cmd_loadright_subscriber, &cmd_loadright_msg,
+            &cmd_loadright_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
 
         if (rclc_executor_add_subscription(&executor, &cmd_servo_subscriber, &cmd_servo_msg,
             &cmd_servo_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
@@ -623,8 +693,10 @@ bool destroyEntities()
         rcl_publisher_fini(&debug_encoder_wheels_publisher, &node);
     #elif teelek_katsu
         rcl_subscription_fini(&cmd_servo_subscriber, &node);
-        rcl_subscription_fini(&cmd_load_subscriber, &node);
-        rcl_publisher_fini(&debug_load_publisher, &node);
+        rcl_subscription_fini(&cmd_loadleft_subscriber, &node);
+        rcl_subscription_fini(&cmd_loadright_subscriber, &node);
+        rcl_publisher_fini(&debug_loadleft_publisher, &node);
+        rcl_publisher_fini(&debug_loadright_publisher, &node);
         rcl_publisher_fini(&debug_servo_publisher, &node);
     #endif
 
@@ -646,11 +718,13 @@ void publishData()
         rcl_publish(&debug_cmd_vel_publisher, &debug_wheel_motor_msg, NULL);
         rcl_publish(&debug_encoder_publisher, &debug_encoder_msg, NULL);
         rcl_publish(&debug_encoder_wheels_publisher, &debug_encoder_wheels_msg, NULL);
-    #elif teelek_latsu
-        debug_load_msg.linear.x = cmd_load_msg.linear.x;
+    #elif teelek_katsu
+        debug_loadleft_msg.linear.x = cmd_loadleft_msg.linear.x;
+        debug_loadright_msg.linear.x = cmd_loadright_msg.linear.x;
         debug_servo_msg.angular.x = cmd_servo_msg.angular.x;
 
-        rcl_publish(&debug_load_publisher, &debug_load_msg, NULL);
+        rcl_publish(&debug_loadleft_publisher, &debug_loadleft_msg, NULL);
+        rcl_publish(&debug_loadright_publisher, &debug_loadright_msg, NULL);
         rcl_publish(&debug_servo_publisher, &debug_servo_msg, NULL);
     #endif
 }

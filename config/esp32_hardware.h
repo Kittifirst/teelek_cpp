@@ -103,10 +103,15 @@
 
     #ifdef teelek_katsu
 
-        // Motor load config
-        #define MOTORLOAD_PWM  -1
-        #define MOTORLOAD_IN_A  4
-        #define MOTORLOAD_IN_B  5
+        // Motor loadleft config
+        #define MOTORLOAD_LEFT_PWM  -1
+        #define MOTORLOAD_LEFT_IN_A  15
+        #define MOTORLOAD_LEFT_IN_B  16
+
+        // Motor loadleft config
+        #define MOTORLOAD_RIGHT_PWM  -1
+        #define MOTORLOAD_RIGHT_IN_A  17
+        #define MOTORLOAD_RIGHT_IN_B  18
 
         // Servo Parameter
         #define SERVO_PIN 39
